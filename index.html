@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>TestPDF - Generador de Tests desde PDFs</title>
+  <!-- Tailwind CSS -->
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <!-- Font Awesome -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.2/css/all.min.css">
+  <!-- Google Fonts: Inter -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  <!-- Chart.js (for summary) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <!-- pdf.js -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <style>
+    body { font-family: 'Inter', sans-serif; background-color: #f3f4f6;}
+    .fade-in { animation: fadeIn 0.5s;}
+    @keyframes fadeIn { from {opacity:0;} to {opacity:1;} }
+    .question-area { background: #fff; border-radius: 0.5rem; padding: 2rem;}
+    .TestPDF-shadow { box-shadow: 0 4px 16px rgba(0,0,0,0.08);}
+    /* For PDF export: avoid fixed heights/scrolls, use responsive layouts */
+    .test-scroll { max-height: none; overflow: visible;}
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+  <header class="py-8 bg-indigo-700 text-white text-center mb-8 shadow flex flex-col justify-center items-center">
+    <h1 class="text-3xl font-semibold flex items-center gap-3"><i class="fa-solid fa-file-pdf"></i> TestPDF - Generador de Tests desde PDFs</h1>
+    <p class="mt-2 text-lg max-w-3xl mx-auto">Sube tu PDF, genera preguntas tipo test basadas en su contenido, responde y visualiza tus resultados con explicaciones. ¡Pensado para oposiciones y estudio serio!</p>
+  </header>
+  
+  <main class="flex flex-col items-center w-full px-2 pb-10">
+    <section id="pdf-upload-section" class="w-full max-w-2xl bg-white TestPDF-shadow rounded-lg py-8 px-6 mb-8 fade-in">
+      <form id="pdf-form" class="flex flex-col gap-4">
+        <label class="block text-sm font-semibold mb-1">Selecciona el archivo PDF de tu temario:</label>
+        <input id="pdf-upload" type="file" accept="application/pdf" required class="block px-3 py-2 rounded border border-gray-300 shadow-sm focus:outline-none" />
+        <button
+          id="analyze-btn"
+          type="button"
+          class="mt-2 inline-flex items-center justify-center gap-2 bg-indigo-700 text-white font-semibold px-6 py-2 rounded hover:bg-indigo-800 focus:ring-2 focus:ring-indigo-400 transition-colors"
+        >
+          <i class="fa-solid fa-magnifying-glass"></i>
+          Analizar PDF y generar preguntas
+        </button>
+      </form>
+      <div id="status-message" class="mt-5 text-sm text-gray-700"></div>
+    </section>
+
+    <section id="test-section" class="w-full max-w-3xl fade-in hidden">
+      <div id="test-content"></div>
+    </section>
+
+    <section id="summary-section" class="w-full max-w-3xl fade-in hidden py-8">
+      <div class="question-area TestPDF-shadow mb-6">
+        <h2 class="text-2xl font-bold text-indigo-700 mb-2 flex items-center gap-2"><i class="fa-solid fa-clipboard-check"></i> Resumen del Test</h2>
+        <div id="summary-info" class="mb-6"></div>
+        <canvas id="summary-chart" aria-label="Estadísticas del test" style="max-width:420px;" class="mb-6"></canvas>
+        <button id="review-btn"
+                class="bg-yellow-500 hover:bg-yellow-600 text-white font-semibold px-4 py-2 rounded transition-colors flex items-center gap-2">
+          <i class="fa-regular fa-eye"></i>
+          Revisar todas las preguntas
+        </button>
+      </div>
+      <div id="review-questions" class="fade-in hidden"></div>
+    </section>
+  </main>
+
+  <footer class="mt-auto text-center py-6 text-gray-400 text-sm">
+    TestPDF &copy; 2024. Desarrollado para estudio avanzado. No almacenar datos del usuario. <span class="mx-1">|</span>
+    Usa <a class="text-indigo-600 underline" href="https://mozilla.github.io/pdf.js/" target="_blank" rel="noopener">pdf.js</a> y <a class="text-indigo-600 underline" href="https://tailwindcss.com/" target="_blank" rel="noopener">TailwindCSS</a>.
+  </footer>
+
+  <script>
+  // PDF.js worker configuration
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+
+  // Bloques de estados y datos globales
+  const statusMsg = document.getElementById('status-message');
+  const testSection = document.getElementById('test-section');
+  const testContent = document.getElementById('test-content');
+  const summarySection = document.getElementById('summary-section');
+  const reviewQuestionsDiv = document.getElementById('review-questions');
+  let testData = [];
+  let userAnswers = [];
+  let correctAnswers = 0;
+
+  // Utilidad: Mostrar mensajes claros para cada paso
+  function showStatus(msg, icon=null, color='blue') {
+    statusMsg.innerHTML = icon
+      ? `<span class="inline-flex items-center gap-1 text-${color}-600"><i class="fa-solid fa-${icon}"></i> ${msg}</span>`
+      : `<span class="inline-flex items-center gap-1 text-${color}-700">${msg}</span>`;
+  }
+
+  // Utilidad: Normalizar texto
+  function cleanText(txt) {
+    return txt.replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  }
+
+  // ---------------------------
+  // 1. Lectura y extracción PDF
+  // ---------------------------
+  document.getElementById('analyze-btn').onclick = async () => {
+    const fileInput = document.getElementById('pdf-upload');
+    const file = fileInput.files[0];
+    if (!file || !file.name.toLowerCase().endsWith('.pdf')) {
+      showStatus("Por favor, selecciona un archivo PDF válido.", "triangle-exclamation", "red");
+      return;
+    }
+    statusMsg.innerHTML = '';
+    testSection.classList.add('hidden');
+    summarySection.classList.add('hidden');
+    reviewQuestionsDiv.classList.add('hidden');
+
+    showStatus("Procesando el PDF, extrayendo texto...", "spinner", "indigo");
+    let text = '';
+    try {
+      text = await extractPDFText(file);
+    } catch (e) {
+      showStatus("Ocurrió un error al leer el PDF. Intenta con otro archivo.", "triangle-exclamation", "red");
+      return;
+    }
+
+    text = cleanText(text);
+    if (!text || text.length < 200) {
+      showStatus("No se pudo extraer suficiente texto. El PDF podría estar protegido, escaneado como imagen o vacío.", "circle-xmark", "red");
+      return;
+    }
+
+    showStatus("Texto extraído correctamente. Generando preguntas tipo test...", "wand-magic-sparkles", "green");
+    setTimeout(() => generateQuestions(text), 600);
+  }
+
+  // Función para extraer texto de PDF usando pdf.js
+  async function extractPDFText(file) {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdfDoc = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+    let textContent = '';
+    for (let i = 1; i <= pdfDoc.numPages; i++) {
+      const page = await pdfDoc.getPage(i);
+      const txt = await page.getTextContent();
+      textContent += txt.items.map(item => item.str).join(' ') + '\n';
+    }
+    return textContent;
+  }
+
+  // ----------------------------
+  // 2. Generar preguntas de test
+  // ----------------------------
+  function generateQuestions(plainText) {
+    // 1. Limpiar y dividir por secciones
+    let paragraphs = plainText.split(/\.\s|\n/).map(s=> cleanText(s)).filter(s=> s.length>30 && s.split(' ').length>5);
+    if (paragraphs.length > 80) paragraphs = paragraphs.slice(0, 80);
+    // 2. Detectar potenciales conceptos clave
+    let concepts = findConcepts(paragraphs).slice(0, 25);
+
+    // 3. Plantillas predefinidas
+    let questions = [];
+    let usedTexts = new Set();
+    for (const c of concepts) {
+      // Evita repetir preguntas sobre el mismo texto
+      if (usedTexts.has(c.text)) continue;
+      usedTexts.add(c.text);
+
+      // Tipos de pregunta plantillados
+      let qtype = Math.random() < 0.67 ? 'definicion' : 'completar';
+      if (qtype === 'definicion') {
+        // Definición: pregunta por la explicación
+        questions.push({
+          question: `¿Qué es <b>${c.term}</b>?`,
+          options: shuffle([
+            c.text,
+            ...getDistractors(paragraphs, c.term, c.text)
+          ]),
+          correct: c.text,
+          explain: "La explicación correcta fue extraída literalmente del documento.",
+          basedOn: c.text
+        });
+      } else {
+        // Completar: quitar término importante de la frase
+        let textWithoutTerm = c.text.replaceAll(c.term, "______");
+        if (textWithoutTerm === c.text) continue;
+        questions.push({
+          question: `Completa la frase: <br><b>${textWithoutTerm}</b>`,
+          options: shuffle([
+            c.term,
+            ...getDistractors(concepts.map(x=>x.term), c.term, c.term, true)
+          ]),
+          correct: c.term,
+          explain: "La palabra eliminada era clave en el contexto de la frase.",
+          basedOn: c.text
+        });
+      }
+      if (questions.length === 15) break;
+    }
+    // Si no hemos llegado a 10 preguntas, rellenar con frases al azar
+    while (questions.length < 10 && paragraphs.length > 10) {
+      let ix = Math.floor(Math.random()*paragraphs.length);
+      let phrase = paragraphs[ix];
+      let words = phrase.split(' ').filter(w=>w.length>6);
+      if (words.length===0) continue;
+      let theTerm = words[Math.floor(Math.random()*words.length)];
+      let textW = phrase.replaceAll(theTerm, "______");
+      questions.push({
+        question: `Completa la frase: <br><b>${textW}</b>`,
+        options: shuffle([
+          theTerm,
+          ...getDistractors(concepts.map(x=>x.term), theTerm, theTerm, true)
+        ]),
+        correct: theTerm,
+        explain: "Palabra eliminada seleccionada al azar en la frase.",
+        basedOn: phrase
+      });
+    }
+    // Si no se pudo generar ninguna:
+    if (questions.length === 0) {
+      showStatus("El PDF tiene un formato complejo o no se encontró información tipo definiciones. Prueba con otro archivo.", "circle-xmark", "red");
+      return;
+    }
+    // Guardar datos y mostrar test
+    testData = questions;
+    userAnswers = [];
+    correctAnswers = 0;
+    statusMsg.innerHTML = '';
+    startTest();
+  }
+
+  // Buscar conceptos tipo "X es...", "Definimos X como...", etc.
+  function findConcepts(paragraphs) {
+    const concepts = [];
+    const definers = [
+      /([A-ZÁÉÍÓÚÑa-záéíóúñ0-9]{3,})\s+(es|se define como|consiste en|son|se denomina|significa|se refiere a|representa|implica)\s+([\s\S]{20,140})/i,
+    ];
+    for (let p of paragraphs) {
+      for (let re of definers) {
+        let m = p.match(re);
+        if (m && m[1] && m[3]) {
+          let term = m[1].replace(/[^A-Za-zÁÉÍÓÚáéíóúÑñ0-9\-]/g,'');
+          // Para evitar que sean términos demasiado generales
+          if (term.length<3 || term.length>40) continue;
+          let txt = m[3].replace(/\s\s+/g, ' ').replace(/^:|:$/g,'').trim();
+          if (txt.length>30 && txt.length<220)
+            concepts.push({ term: term, text: txt });
+        }
+      }
+    }
+    // Si no se detecta ninguno, intenta extraer los títulos y su primer párrafo
+    if (concepts.length<4) {
+      let titles = paragraphs.filter(s => s.match(/^[A-ZÁÉÍÓÚÑ][^\.\,]{6,50}$/));
+      for (let t of titles) {
+        let ix = paragraphs.indexOf(t);
+        if (ix!==-1 && paragraphs[ix+1])
+          concepts.push({term:t.trim(),text:paragraphs[ix+1]});
+      }
+    }
+    // Filtrar duplicados
+    return concepts.filter((obj,ix,arr)=>
+      arr.findIndex(o2=>o2.term===obj.term && o2.text===obj.text)===ix
+    );
+  }
+
+  // Obtener distractores para opciones múltiples
+  function getDistractors(list, term, exceptText, isTerm) {
+    let pool = list.filter(x=> {
+      if (isTerm && (!x || x.toLowerCase()===term.toLowerCase())) return false;
+      return x!==exceptText && x.length>5 && x.length!==Number(term?.length);
+    });
+    pool = shuffle(pool);
+    return pool.slice(0,3);
+  }
+
+  // Aleatorizar array
+  function shuffle(array) {
+    // Fisher-Yates
+    for (let i = array.length - 1; i > 0; i--) {
+      let j = Math.floor(Math.random() * (i + 1));
+      [array[i], array[j]] = [array[j], array[i]];
+    }
+    return array;
+  }
+
+  // ----------------------
+  // 3. Test: mostrar y flow
+  // ----------------------
+  function startTest() {
+    testSection.classList.remove('hidden');
+    summarySection.classList.add('hidden');
+    displayQuestion(0);
+    window.scrollTo({top: testSection.offsetTop-30, behavior: "smooth"});
+  }
+
+  function displayQuestion(qIdx) {
+    let q = testData[qIdx];
+    testContent.innerHTML = `
+      <div class="question-area TestPDF-shadow mb-6">
+        <div class="flex items-center justify-between mb-3">
+          <span class="text-gray-600">Pregunta ${qIdx+1} de ${testData.length}</span>
+          <span class="text-indigo-600 text-sm font-semibold">Puntos: ${correctAnswers} / ${testData.length}</span>
+        </div>
+        <div class="font-semibold text-lg mb-3">${q.question}</div>
+        <form id="test-form" class="space-y-3 mb-3">
+          ${q.options.map((o,ix)=>`
+            <label class="block cursor-pointer bg-indigo-50 rounded px-3 py-2 hover:bg-indigo-100">
+              <input required type="radio" name="answer" value="${ix}" class="mr-2 align-middle" />
+              ${o}
+            </label>`).join('')}
+          <button type="submit" class="mt-4 bg-indigo-700 text-white px-5 py-1.5 rounded hover:bg-indigo-800 transition-colors font-semibold">
+            Responder
+          </button>
+        </form>
+        <div class="mt-5 flex">
+          <button type="button"
+             onclick="window.location.reload()"
+             class="mr-3 bg-gray-200 px-3 py-1 text-gray-700 rounded hover:bg-gray-300 text-sm">
+            Reiniciar test
+          </button>
+        </div>
+      </div>
+    `;
+    testContent.scrollIntoView({behavior:'smooth', block:'center'});
+    document.getElementById('test-form').onsubmit = (ev) => {
+      ev.preventDefault();
+      let selected = Number([...ev.target.elements.answer].find(x=>x.checked).value);
+      handleAnswer(qIdx, selected);
+    }
+  }
+
+  function handleAnswer(qIdx, answerIx) {
+    let q = testData[qIdx];
+    userAnswers[qIdx] = answerIx;
+    // Mostrar resultado inmediato
+    const isCorrect = q.options[answerIx] === q.correct;
+    if (isCorrect) correctAnswers++;
+    let msg = isCorrect
+      ? `<span class="text-green-700 font-semibold"><i class="fa-solid fa-circle-check"></i> ¡Correcto!</span>`
+      : `<span class="text-red-700 font-semibold"><i class="fa-solid fa-circle-xmark"></i> Incorrecto.</span>`;
+
+    testContent.innerHTML = `
+      <div class="question-area TestPDF-shadow mb-6">
+        <div class="flex items-center justify-between mb-3">
+          <span class="text-gray-600">Pregunta ${qIdx+1} de ${testData.length}</span>
+          <span class="text-indigo-600 text-sm font-semibold">Puntos: ${correctAnswers} / ${testData.length}</span>
+        </div>
+        <div class="font-semibold text-lg mb-3">${q.question}</div>
+        <div class="mb-3">
+          ${q.options.map((o,ix)=>
+            `<div class="block px-4 py-2 rounded
+              ${ix===answerIx ? (isCorrect ? 'bg-green-100' : 'bg-red-100') : ''}
+              ${o===q.correct && !isCorrect ? 'border-l-4 border-green-600 bg-green-50 font-semibold' : ''}">
+              <i class="fa-solid ${ix===answerIx?(isCorrect?'fa-check':'fa-times'):''}"></i> ${o}
+            </div>`
+          ).join('')}
+        </div>
+        <div class="my-3">${msg}</div>
+        <div class="text-xs italic text-gray-500 mb-3">
+          <b>Explicación:</b> ${q.explain}
+          <br>
+          <b>Fragmento del PDF:</b> <span>${q.basedOn}</span>
+        </div>
+        <button id="next-q-btn"
+                class="bg-indigo-700 text-white px-6 py-2 mt-2 rounded font-semibold hover:bg-indigo-800">
+           ${qIdx===testData.length-1 ? 'Finalizar test' : 'Siguiente pregunta'}
+        </button>
+      </div>
+    `;
+    document.getElementById('next-q-btn').onclick = () => {
+      if (qIdx === testData.length - 1) showSummary();
+      else displayQuestion(qIdx+1);
+    }
+  }
+
+  // ----------------------
+  // 4. Resumen del test
+  // ----------------------
+  function showSummary() {
+    testSection.classList.add('hidden');
+    summarySection.classList.remove('hidden');
+    reviewQuestionsDiv.classList.add('hidden');
+    const total = testData.length;
+    const aciertos = correctAnswers;
+    const fallo = total - aciertos;
+    document.getElementById('summary-info').innerHTML = `
+      <div class="flex flex-col sm:flex-row items-center gap-4 mb-4">
+        <div class="rounded-full bg-indigo-50 px-7 py-3 text-center">
+          <div class="text-3xl font-bold text-indigo-700">${aciertos}</div>
+          <div class="text-indigo-600 text-xs font-semibold">Aciertos</div>
+        </div>
+        <div class="rounded-full bg-red-50 px-7 py-3 text-center">
+          <div class="text-3xl font-bold text-red-700">${fallo}</div>
+          <div class="text-red-600 text-xs font-semibold">Fallos</div>
+        </div>
+        <div class="rounded-full bg-gray-100 px-7 py-3 text-center">
+          <div class="text-3xl font-bold text-gray-900">${total}</div>
+          <div class="text-gray-600 text-xs font-semibold">Preguntas</div>
+        </div>
+      </div>
+      <div class="text-lg font-medium mb-2 mt-4 ${aciertos/total>=0.7 ? 'text-green-700' : 'text-yellow-700'}">
+        ${aciertos/total>=0.7
+            ? '¡Buen trabajo! Continúa practicando para afianzar conocimientos.'
+            : 'Practica más sobre las preguntas que respondiste mal.'}
+      </div>
+    `;
+    // Render Chart.js
+    setTimeout(()=>drawSummaryChart(aciertos, fallo), 80);
+    // Revisar preguntas
+    document.getElementById('review-btn').onclick = () => { showReview(); };
+    window.scrollTo({top: summarySection.offsetTop-15,behavior:'smooth'});
+  }
+
+  function drawSummaryChart(aciertos, fallo) {
+    let ctx = document.getElementById('summary-chart').getContext('2d');
+    if (window._chart_) window._chart_.destroy();
+    window._chart_ = new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        labels: ['Aciertos', 'Fallos'],
+        datasets: [{
+          data: [aciertos, fallo],
+          backgroundColor: ['#6366f1', '#f87171'],
+        }]
+      },
+      options: {
+        plugins: {
+          legend: {position:'bottom'},
+          tooltip: {enabled:true}
+        },
+        cutout:'65%',
+        responsive: false
+      }
+    });
+  }
+
+  // ----------------------------------
+  // 5. Revisión en detalle del test
+  // ----------------------------------
+  function showReview() {
+    reviewQuestionsDiv.innerHTML = testData.map((q,ix)=>`
+      <div class="question-area TestPDF-shadow mb-6">
+        <div class="flex flex-wrap justify-between items-center mb-3">
+           <span class="text-gray-600">Pregunta ${ix+1}:</span>
+           <span class="
+             text-xs font-semibold px-2 py-1 
+             ${q.options[userAnswers[ix]]===q.correct ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}
+             rounded"
+           >
+             ${q.options[userAnswers[ix]]===q.correct ? '<i class="fa-solid fa-circle-check"></i> Correcta' : '<i class="fa-solid fa-circle-xmark"></i> Incorrecta'}
+           </span>
+        </div>
+        <div class="font-semibold mb-2">${q.question}</div>
+        <div>
+        ${q.options.map((o,oi)=>
+          `<div class="block px-4 py-2 rounded mb-1
+            ${o===q.correct ? 'bg-green-100 font-semibold' : oi===userAnswers[ix] ? 'bg-red-50' : 'bg-gray-50'}">
+            <i class="fa-solid ${o===q.correct ? 'fa-check' : oi===userAnswers[ix] ? 'fa-xmark' : ''}"></i>
+            ${o}
+          </div>`).join('')}
+        </div>
+        <div class="text-xs mt-2 italic text-gray-600">
+          <b>Explicación:</b> ${q.explain}
+          <br/>
+          <b>Fragmento PDF:</b> <span>${q.basedOn}</span>
+        </div>
+      </div>
+    `).join('');
+    reviewQuestionsDiv.classList.remove('hidden');
+    window.scrollTo({top: reviewQuestionsDiv.offsetTop-20, behavior:'smooth'});
+  }
+
+  </script>
+</body>
+</html>
+
